@@ -1,0 +1,28 @@
+# config.yaml acts as the central control panel. Instead of hard-coding values into your scripts, 
+# you define them here. This is a critical practice for academic research because it allows you 
+# to run multiple experiments (e.g., comparing different learning rates or class weights) and 
+# document exactly which settings produced your best results.
+
+
+# Data Configuration
+raw_data_path: "data/raw/upi_transactions_2024.csv"
+processed_data_path: "data/processed/upi_graph.pt"
+
+# Model Architecture
+model_type: "GraphSAGE"
+hidden_channels: 64
+dropout_rate: 0.3
+
+# Training Hyperparameters
+learning_rate: 0.01
+epochs: 500
+batch_size: 1024  # Used if implementing NeighborLoader for large graphs
+
+# Loss Function & Imbalance Handling
+# Since fraud is only ~0.2%, we weight the 'Fraud' class (1) much higher
+# than the 'Legitimate' class (0) to force the model to prioritize recall.
+fraud_weight: 75.0 
+
+# Paths for Saving Results
+model_save_path: "models/saved_weights/upi_gnn_best.pth"
+checkpoint_dir: "models/checkpoints/"
