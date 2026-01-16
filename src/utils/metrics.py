@@ -115,3 +115,48 @@ def plot_pr_curve(model, data, output_path='outputs/pr_curve.png'):
     plt.grid(True)
     plt.savefig(output_path)
     print(f"📈 PR Curve saved to {output_path}")
+
+from sklearn.manifold import TSNE
+import seaborn as sns
+
+def plot_node_embeddings(model, data, output_path='outputs/node_embeddings.png'):
+    model.eval()
+    
+    # FORCE: Use the actual shape of the features, not the .num_nodes property
+    actual_node_count = data.x.shape[0]
+    print(f"📊 Feature Matrix contains: {actual_node_count} nodes")
+    
+    with torch.no_grad():
+        # Get embeddings from the second GraphSAGE layer
+        x = model.conv1(data.x, data.edge_index).relu()
+        all_embeddings = model.conv2(x, data.edge_index).cpu().numpy()
+        y = data.y.cpu().numpy()
+
+    # Sample 5,000 nodes for a clean visualization
+    sample_size = min(5000, actual_node_count)
+    
+    if sample_size < 30:
+        print(f"⚠️ Warning: Still only seeing {sample_size} nodes. Visualization skipped.")
+        return
+
+    print(f"🎨 Computing t-SNE for {sample_size} points... (This takes 1-2 minutes)")
+    indices = np.random.choice(actual_node_count, sample_size, replace=False)
+    
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+    embeddings_2d = tsne.fit_transform(all_embeddings[indices])
+
+    plt.figure(figsize=(10, 8))
+    sns.scatterplot(
+        x=embeddings_2d[:, 0], 
+        y=embeddings_2d[:, 1],
+        hue=y[indices], 
+        palette={0: '#3498db', 1: '#e74c3c'},
+        alpha=0.6, 
+        s=20,
+        edgecolor='w',
+        linewidth=0.5
+    )
+    plt.title('t-SNE Visualization: UPI VPA Latent Space')
+    plt.legend(title='Status', labels=['Legitimate', 'Fraudulent'])
+    plt.savefig(output_path, dpi=300)
+    print(f"✅ FINAL SUCCESS! Embedding map saved to {output_path}")
