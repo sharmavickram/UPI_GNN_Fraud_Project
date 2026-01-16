@@ -9,23 +9,21 @@ from sklearn.preprocessing import StandardScaler
 def preprocess_upi_data(df):
     print("🛠️  Running high-signal feature engineering...")
     
-    # 1. Clean column names and convert timestamp
-    df.columns = df.columns.str.strip()
+    # 1. Standardize internal names to lowercase
+    df.columns = df.columns.str.strip().str.lower()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     
-    # 2. Map day_of_week to numbers
-    day_map = {
-        'Monday': 0, 'Tuesday': 1, 'Wednesday': 2, 'Thursday': 3, 
-        'Friday': 4, 'Saturday': 5, 'Sunday': 6
-    }
+    # 2. Map day_of_week
+    day_map = {'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3, 
+               'friday': 4, 'saturday': 5, 'sunday': 6}
     if df['day_of_week'].dtype == 'object':
-        df['day_of_week'] = df['day_of_week'].map(day_map)
+        df['day_of_week'] = df['day_of_week'].str.lower().map(day_map)
 
-    # 3. Calculate Behavioral Velocity (CRITICAL FIX: Define before scaling)
+    # 3. Behavioral Velocity (FIX: Use lowercase 'amount (inr)')
     df = df.sort_values(['sender_bank', 'timestamp']).reset_index(drop=True)
     df['tx_velocity_1h'] = (
         df.set_index('timestamp')
-        .groupby('sender_bank')['amount (INR)']
+        .groupby('sender_bank')['amount (inr)'] # <--- Changed to lowercase
         .rolling('1h')
         .count()
         .values
@@ -39,18 +37,14 @@ def preprocess_upi_data(df):
     # We use 'device_type' and 'merchant_category'
     df = pd.get_dummies(df, columns=['device_type', 'merchant_category'], prefix=['dev', 'cat'])
 
-    # 6. Define feature sets
+    # 6. Define feature sets (FIX: Use lowercase 'amount (inr)')
     binary_cols = [col for col in df.columns if col.startswith(('dev_', 'cat_'))]
-    numeric_cols = ['amount (INR)', 'tx_velocity_1h', 'hour_of_day', 'day_of_week']
+    numeric_cols = ['amount (inr)', 'tx_velocity_1h', 'hour_of_day', 'day_of_week']
     all_features = numeric_cols + binary_cols
 
-    # 7. Scaling numeric features only
+    # 7. Scaling
     scaler = StandardScaler()
     df[numeric_cols] = df[numeric_cols].fillna(0)
     df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
     
-    # Fill NAs for binary columns just in case
-    df[binary_cols] = df[binary_cols].fillna(0).astype(int)
-    
-    print(f"📊 Feature Engineering Complete. Total features: {len(all_features)}")
     return df, scaler, all_features
