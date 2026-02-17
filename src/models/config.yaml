@@ -5,18 +5,22 @@
 
 
 # Data Configuration
-raw_data_path: "data/raw/upi_transactions_2024.csv"
+raw_data_path: "data/raw/upi_transactions.csv"
 processed_data_path: "data/processed/upi_graph.pt"
 
 # Model Architecture
-model_type: "GraphSAGE"
+model_type: "graphsage"  # Options: "graphsage" or "gat"
 hidden_channels: 64
 dropout_rate: 0.3
+gat_heads: 4  # Number of attention heads for GAT
 
 # Training Hyperparameters
 learning_rate: 0.01
 epochs: 500
 batch_size: 1024  # Used if implementing NeighborLoader for large graphs
+patience: 30  # Early stopping patience
+test_size: 0.2  # Train/test split ratio
+seed: 42  # Random seed for reproducibility
 
 # Loss Function & Imbalance Handling
 # Since fraud is only ~0.2%, we weight the 'Fraud' class (1) much higher

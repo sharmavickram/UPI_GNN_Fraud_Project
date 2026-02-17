@@ -1,30 +1,55 @@
-# trainer.py is the execution engine that manages the backpropagation process. For UPI fraud detection, 
-# the trainer's most important job is to handle class imbalance (where 99.8% of transactions are legitimate) '
-# 'so that the model doesn't just learn to ignore the few fraudulent cases.
+# trainer.py is the execution engine that manages the backpropagation process. For UPI fraud detection,
+# the trainer's most important job is to handle class imbalance (where 99.8% of transactions are legitimate)
+# so that the model doesn't just learn to ignore the few fraudulent cases.
 
 import torch
 import torch.nn as nn
 
+
 def train(model, data, optimizer, criterion):
     model.train()
     optimizer.zero_grad()
-    
-    # 1. Ensure all graph components are on the same device as the model
-    # (x, edge_index, and y)
+
     device = next(model.parameters()).device
     data = data.to(device)
-    
-    # 2. Forward pass
+
     logits = model(data.x, data.edge_index)
-    
-    # 3. Compute loss
-    # Our model predicts for every edge (transaction), so we compare against data.y
+
     loss = criterion(logits, data.y)
-    
-    # 4. Backward pass
+
     loss.backward()
     optimizer.step()
-    
+
+    return loss.item()
+
+
+def train_with_mask(model, data, optimizer, criterion, edge_mask):
+    """
+    Train on a subset of edges specified by edge_mask.
+
+    Args:
+        model: The GNN model
+        data: PyTorch Geometric Data object
+        optimizer: Optimizer
+        criterion: Loss function
+        edge_mask: Boolean mask indicating which edges to train on
+    """
+    model.train()
+    optimizer.zero_grad()
+
+    device = next(model.parameters()).device
+    data = data.to(device)
+    edge_mask = edge_mask.to(device)
+
+    # Forward pass - get predictions for ALL edges
+    logits = model(data.x, data.edge_index)
+
+    # Compute loss only on the masked edges
+    loss = criterion(logits[edge_mask], data.y[edge_mask])
+
+    loss.backward()
+    optimizer.step()
+
     return loss.item()
 
 def get_criterion(fraud_weight, device):

@@ -1,8 +1,5 @@
-# main.py script serves as the orchestrator for your entire project. It imports your modular 
-# components to clean data, build the graph, train the GNN, and save the final results.
-
-# main.py script serves as the orchestrator for your entire project. 
-# It imports your modular components to clean data, build the graph, 
+# main.py script serves as the orchestrator for your entire project.
+# It imports your modular components to clean data, build the graph,
 # train the GNN, and save the final results.
 
 import os
@@ -10,15 +7,16 @@ import torch
 import pandas as pd
 import yaml
 import numpy as np
-import copy # Added for deepcopy
+import copy
 
 # Import your custom modules
 from features import preprocess_upi_data
-from data_loader import build_graph
-from models.model import UPIGraphSAGE
-from utils.trainer import train
-from utils.metrics import evaluate_model, get_detailed_logs, plot_node_embeddings 
+from data_loader import build_graph_with_split
+from models.model import UPIGraphSAGE, get_model
+from utils.trainer import train, train_with_mask
+from utils.metrics import evaluate_model, get_detailed_logs, plot_node_embeddings
 from utils.metrics import plot_feature_importance, plot_pr_curve
+
 
 def main():
     # 1. Load Hyperparameters from config
@@ -26,107 +24,149 @@ def main():
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 
-                          ('mps' if torch.backends.mps.is_available() else 'cpu'))
-    print(f"🚀 Starting UPI Fraud Detection Pipeline on {device}...")
+    # Set seeds for reproducibility
+    seed = config.get('seed', 42)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
-   # 2. Data Acquisition
-    raw_data_path = 'data/raw/upi_transactions.csv'
+    device = torch.device('cuda' if torch.cuda.is_available() else
+                          ('mps' if torch.backends.mps.is_available() else 'cpu'))
+    print(f"Starting UPI Fraud Detection Pipeline on {device}...")
+
+    # 2. Data Acquisition
+    raw_data_path = config.get('raw_data_path', 'data/raw/upi_transactions.csv')
     df_raw = pd.read_csv(raw_data_path)
-    df_raw.columns = df_raw.columns.str.strip().str.lower() 
+    df_raw.columns = df_raw.columns.str.strip().str.lower()
 
     # --- SYNTHETIC VPA GENERATION ---
-    # Since specific VPAs are missing, we create unique "Node IDs" 
-    # based on Bank + State combinations to simulate a network.
+    # Create unique "Node IDs" based on Bank + State combinations
     print("Generating synthetic network topology...")
     df_raw['sender_vpa'] = df_raw['sender_bank'] + "_" + df_raw['sender_state']
     df_raw['receiver_vpa'] = df_raw['receiver_bank'] + "_Merchant_" + df_raw['merchant_category']
-    
-    vpa_backup = df_raw[['sender_vpa', 'receiver_vpa']].copy()
 
-    # --------------------------------
-
-    # 3. Feature Engineering
+    # 3. Feature Engineering on ALL data (to get consistent features)
+    print("Running feature engineering on full dataset...")
     df_processed, scaler, feature_list = preprocess_upi_data(df_raw)
-    num_features = len(feature_list) # Define this here!
+    num_features = len(feature_list)
 
-    # 4. Graph Construction
-    print("🕸️  Building transaction graph...")
-    df_processed['sender_vpa'] = vpa_backup['sender_vpa']
-    df_processed['receiver_vpa'] = vpa_backup['receiver_vpa']
-    
-    data, vpa_map = build_graph(df_processed, feature_list)
-    print(f"📊 Graph Created with {data.num_nodes} nodes and {data.edge_index.shape[1]} edges.")
-    
-    # CRITICAL FIX: Save a deep copy of the full graph before training starts
-    # This ensures 'full_graph_storage' always has all 250k nodes
-    full_graph_storage = copy.deepcopy(data).to(device)
+    # 4. Build graph with EDGE-LEVEL train/test split
+    # This keeps all nodes visible but splits edges for evaluation
+    print("Building graph with edge-level train/test split...")
+    test_size = config.get('test_size', 0.2)
+
+    data, vpa_map = build_graph_with_split(
+        df_processed,
+        feature_list,
+        test_size=test_size,
+        random_state=seed
+    )
+
+    print(f"Graph: {data.num_nodes} nodes, {data.edge_index.shape[1]} edges")
+    print(f"Train edges: {data.train_mask.sum()}, Test edges: {data.test_mask.sum()}")
+
     data = data.to(device)
 
     # 5. Initialize Model
-    model = UPIGraphSAGE(
-        in_channels=num_features, 
-        hidden_channels=config.get('hidden_channels', 128), 
-        out_channels=2
+    model_type = config.get('model_type', 'graphsage')
+    print(f"Using model: {model_type}")
+
+    model = get_model(
+        model_type=model_type,
+        in_channels=num_features,
+        hidden_channels=config.get('hidden_channels', 64),
+        out_channels=2,
+        heads=config.get('gat_heads', 4)
     ).to(device)
-        
+
     optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
-    
-    fraud_weight = config.get('fraud_weight', 500.0)
+
+    fraud_weight = config.get('fraud_weight', 75.0)
     weights = torch.tensor([1.0, float(fraud_weight)]).to(device)
     criterion = torch.nn.CrossEntropyLoss(weight=weights)
 
-   # 6. Training Loop
-    print(f"🏋️  Training for {config['epochs']} epochs...")
-    best_f1 = 0
-    best_threshold = 0.5 
-    
+    # 6. Training Loop
+    print(f"Training for {config['epochs']} epochs...")
+
+    patience = config.get('patience', 30)
+    patience_counter = 0
+    best_val_f1 = 0
+    best_threshold = 0.5
+
     for epoch in range(1, config['epochs'] + 1):
-        loss = train(model, data, optimizer, criterion)
-        
+        # Train on train_mask edges only
+        loss = train_with_mask(model, data, optimizer, criterion, data.train_mask)
+
         if epoch % 10 == 0 or epoch == 1:
-            precision, recall, f1, auprc, epoch_threshold = evaluate_model(model, data)
+            # Evaluate on TEST set (not training set) for proper evaluation
+            precision, recall, f1, auprc, epoch_threshold = evaluate_model(
+                model, data, edge_mask=data.test_mask
+            )
             scheduler.step(f1)
-            if f1 > best_f1:
-                best_f1 = f1
-                best_threshold = epoch_threshold 
+
+            if f1 > best_val_f1:
+                best_val_f1 = f1
+                best_threshold = epoch_threshold
+                patience_counter = 0
                 torch.save(model.state_dict(), 'models/saved_weights/upi_gnn_best.pth')
-            print(f"Epoch {epoch:03d} | Loss: {loss:.4f} | F1: {f1:.4f} | Recall: {recall:.4f}")
+            else:
+                patience_counter += 1
 
-    # 7. Final Detailed Report
-    print("\n📊 --- FINAL PERFORMANCE REPORT ---")
-    model.load_state_dict(torch.load('models/saved_weights/upi_gnn_best.pth'))
-    
-    # Use full_graph_storage to ensure logs are calculated on the whole dataset
-    tn, fp, fn, tp = get_detailed_logs(model, full_graph_storage, threshold=best_threshold)
-    
-    print(f"Using Optimal Threshold: {best_threshold:.4f}")
-    print(f"Transactions Correctly Identified as Legitimate (TN): {tn}")
-    print(f"Transactions Correctly Identified as FRAUD      (TP): {tp} ✅")
-    print(f"Innocent Transactions Blocked            (FP): {fp} ❌")
-    print(f"Fraudulent Transactions Missed           (FN): {fn} ⚠️")
+            print(f"Epoch {epoch:03d} | Loss: {loss:.4f} | Val F1: {f1:.4f} | "
+                  f"Recall: {recall:.4f} | Patience: {patience_counter}/{patience}")
 
-    # 8. Explainability & Visualization
-    print("\n🔍 FORCE-LOADING FULL DATA FOR VISUALIZATION...")
-    
-    # Reload the model and full data to avoid the "8 nodes" buffer issue
+            if patience_counter >= patience:
+                print(f"Early stopping triggered at epoch {epoch}")
+                break
+
+    # 7. Final Evaluation
+    print("\n" + "="*50)
+    print("FINAL PERFORMANCE REPORT")
+    print("="*50)
+
     model.load_state_dict(torch.load('models/saved_weights/upi_gnn_best.pth'))
     model.eval()
 
-    # Re-build the full graph object fresh for the final plots
-    full_data_final, _ = build_graph(df_processed, feature_list)
-    full_data_final = full_data_final.to(device)
+    # Training set performance
+    print("\n--- Training Set Performance ---")
+    train_precision, train_recall, train_f1, train_auprc, train_threshold = evaluate_model(
+        model, data, edge_mask=data.train_mask
+    )
+    print(f"Precision: {train_precision:.4f}")
+    print(f"Recall:    {train_recall:.4f}")
+    print(f"F1:        {train_f1:.4f}")
+    print(f"AUPRC:     {train_auprc:.4f}")
 
-    print(f"📊 Verified Nodes for Plotting: {full_data_final.num_nodes}")
-    
+    tn_train, fp_train, fn_train, tp_train = get_detailed_logs(
+        model, data, edge_mask=data.train_mask, threshold=best_threshold
+    )
+    print(f"TN: {tn_train} | TP: {tp_train} | FP: {fp_train} | FN: {fn_train}")
+
+    # Test set performance (the true metric)
+    print("\n--- Test Set Performance (FINAL METRIC) ---")
+    test_precision, test_recall, test_f1, test_auprc, test_threshold = evaluate_model(
+        model, data, edge_mask=data.test_mask
+    )
+    print(f"Precision: {test_precision:.4f}")
+    print(f"Recall:    {test_recall:.4f}")
+    print(f"F1:        {test_f1:.4f}")
+    print(f"AUPRC:     {test_auprc:.4f}")
+
+    tn_test, fp_test, fn_test, tp_test = get_detailed_logs(
+        model, data, edge_mask=data.test_mask, threshold=best_threshold
+    )
+    print(f"TN: {tn_test} | TP: {tp_test} | FP: {fp_test} | FN: {fn_test}")
+
+    # 8. Visualization
+    print("\nGenerating visualizations...")
     plot_feature_importance(model, feature_list)
-    plot_pr_curve(model, full_data_final)
-    
-    # This should now show 250,000+ nodes and generate the PNG
-    plot_node_embeddings(model, full_data_final)
+    plot_pr_curve(model, data, edge_mask=data.test_mask)
+    plot_node_embeddings(model, data)
 
-    print("\n✅ All tasks complete. Check the 'outputs/' folder for your PNG files.")
+    print("\nAll tasks complete. Check the 'outputs/' folder for your PNG files.")
+
 
 if __name__ == "__main__":
     main()

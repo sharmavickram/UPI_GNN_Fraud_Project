@@ -6,9 +6,9 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-def preprocess_upi_data(df):
+def preprocess_upi_data(df, scaler=None, feature_list=None):
     print("🛠️  Running high-signal feature engineering...")
-    
+
     # 1. Standardize internal names to lowercase
     df.columns = df.columns.str.strip().str.lower()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -19,11 +19,11 @@ def preprocess_upi_data(df):
     if df['day_of_week'].dtype == 'object':
         df['day_of_week'] = df['day_of_week'].str.lower().map(day_map)
 
-    # 3. Behavioral Velocity (FIX: Use lowercase 'amount (inr)')
+    # 3. Behavioral Velocity
     df = df.sort_values(['sender_bank', 'timestamp']).reset_index(drop=True)
     df['tx_velocity_1h'] = (
         df.set_index('timestamp')
-        .groupby('sender_bank')['amount (inr)'] # <--- Changed to lowercase
+        .groupby('sender_bank')['amount (inr)']
         .rolling('1h')
         .count()
         .values
@@ -43,8 +43,21 @@ def preprocess_upi_data(df):
     all_features = numeric_cols + binary_cols
 
     # 7. Scaling
-    scaler = StandardScaler()
-    df[numeric_cols] = df[numeric_cols].fillna(0)
-    df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
-    
+    if scaler is None:
+        scaler = StandardScaler()
+        df[numeric_cols] = df[numeric_cols].fillna(0)
+        df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
+    else:
+        df[numeric_cols] = df[numeric_cols].fillna(0)
+        df[numeric_cols] = scaler.transform(df[numeric_cols])
+
+    # Ensure all expected columns exist
+    if feature_list is not None:
+        for col in feature_list:
+            if col not in df.columns:
+                df[col] = 0
+        all_features = feature_list
+    else:
+        all_features = numeric_cols + binary_cols
+
     return df, scaler, all_features

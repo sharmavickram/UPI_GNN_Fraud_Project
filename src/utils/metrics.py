@@ -1,4 +1,4 @@
-# metrics.py is the most critical file for academic evaluation. Because your fraud rate is only 0.2%, 
+# metrics.py is the most critical file for academic evaluation. Because your fraud rate is only 0.2%,
 # standard accuracy will always be 99.8% even if your model catches zero fraud.
 
 import torch
@@ -7,12 +7,16 @@ from sklearn.metrics import precision_recall_fscore_support, average_precision_s
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-import torch
 import os
 
-def evaluate_model(model, data):
+def evaluate_model(model, data, edge_mask=None):
     """
     Calculates essential metrics and returns the threshold that maximized F1.
+
+    Args:
+        model: The GNN model
+        data: PyTorch Geometric Data object
+        edge_mask: Optional boolean mask to evaluate only on specific edges
     """
     model.eval()
     with torch.no_grad():
@@ -21,33 +25,35 @@ def evaluate_model(model, data):
         probs = F.softmax(logits, dim=1)[:, 1].cpu().numpy()
         y_true = data.y.cpu().numpy()
 
+        # Apply edge mask if provided
+        if edge_mask is not None:
+            edge_mask = edge_mask.cpu().numpy() if isinstance(edge_mask, torch.Tensor) else edge_mask
+            probs = probs[edge_mask]
+            y_true = y_true[edge_mask]
+
         # 2. Dynamic Threshold Search
         best_f1 = 0
         final_precision, final_recall = 0, 0
-        best_threshold = 0.1 # Default starting point
-        
-        # Test 50 different thresholds to find the "sweet spot"
+        best_threshold = 0.1
+
         for threshold in np.linspace(0.01, 0.8, 50):
             preds = (probs > threshold).astype(int)
             precision, recall, f1, _ = precision_recall_fscore_support(
                 y_true, preds, average='binary', zero_division=0
             )
-            
+
             if f1 > best_f1:
                 best_f1 = f1
                 final_precision = precision
                 final_recall = recall
                 best_threshold = threshold
 
-        # 3. Calculate AUPRC (Area Under Precision-Recall Curve)
+        # 3. Calculate AUPRC
         auprc = average_precision_score(y_true, probs)
 
-        print(f"DEBUG: Best Threshold: {best_threshold:.3f}")
-        
-        # 🔥 CRITICAL: Return exactly 5 values to match main.py
         return final_precision, final_recall, best_f1, auprc, best_threshold
 
-def get_detailed_logs(model, data, threshold=0.5):
+def get_detailed_logs(model, data, threshold=0.5, edge_mask=None):
     """
     Generates counts for the Confusion Matrix based on a specific threshold.
     """
@@ -56,7 +62,13 @@ def get_detailed_logs(model, data, threshold=0.5):
         logits = model(data.x, data.edge_index)
         probs = F.softmax(logits, dim=1)[:, 1].cpu().numpy()
         y_true = data.y.cpu().numpy()
-        
+
+        # Apply edge mask if provided
+        if edge_mask is not None:
+            edge_mask = edge_mask.cpu().numpy() if isinstance(edge_mask, torch.Tensor) else edge_mask
+            probs = probs[edge_mask]
+            y_true = y_true[edge_mask]
+
         preds = (probs > threshold).astype(int)
         # Handle cases where the model might predict only one class
         try:
@@ -95,13 +107,19 @@ def plot_feature_importance(model, feature_names, output_path='outputs/feature_i
 
 from sklearn.metrics import precision_recall_curve, auc
 
-def plot_pr_curve(model, data, output_path='outputs/pr_curve.png'):
+def plot_pr_curve(model, data, edge_mask=None, output_path='outputs/pr_curve.png'):
     model.eval()
     with torch.no_grad():
         logits = model(data.x, data.edge_index)
         probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
         y_true = data.y.cpu().numpy()
-    
+
+        # Apply edge mask if provided
+        if edge_mask is not None:
+            edge_mask = edge_mask.cpu().numpy() if isinstance(edge_mask, torch.Tensor) else edge_mask
+            probs = probs[edge_mask]
+            y_true = y_true[edge_mask]
+
     precision, recall, _ = precision_recall_curve(y_true, probs)
     pr_auc = auc(recall, precision)
 
